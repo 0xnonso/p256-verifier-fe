@@ -409,16 +409,12 @@ fn mod_inv(u: u256, f: u256, minus_2modf: u256) -> u256 {
 contract P256Verifier {
 
     pub unsafe fn __call__() {
-        /// Precompiles don't use a function signature. The first byte of callldata
-        /// is the first byte of an input argument. In this case:
         
         /// input[  0: 32] = signed data hash
         /// input[ 32: 64] = signature r
         /// input[ 64: 96] = signature s
         /// input[ 96:128] = public key x
         /// input[128:160] = public key y
-     
-        /// result[ 0: 32] = 0x00..00 (invalid) or 0x00..01 (valid)
 
         let mut buf: MemoryBuffer = MemoryBuffer::new(len: 32)
         let mut writer: MemoryBufferWriter = buf.writer()
