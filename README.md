@@ -1,138 +1,28 @@
-# Foundry x Fe
+# `P256Verifier` Fe Contract
+`P256` signature verification [Fe contract](./src/P256Verifier.fe). This implementation is inspired by [dcposch](https://github.com/dcposch)'s and [nalinbhardwaj](https://github.com/nalinbhardwaj)'s implementation [here](https://github.com/daimo-eth/p256-verifier/blob/master/src/P256Verifier.sol) and [pcaversaccio](https://github.com/pcaversaccio)'s implementation [here](https://github.com/pcaversaccio/p256-verifier-vyper/blob/main/src/P256Verifier.vy). Also, for more technical details, please refer to [EIP-7212](https://eips.ethereum.org/EIPS/eip-7212).
 
-A Foundry template to compile and test Fe contracts. 
+> This is **experimental software** and is provided on an "as is" and "as available" basis. We **do not give any warranties** and **will not be liable for any losses** incurred through any use of this code base.
 
-<img src="https://raw.githubusercontent.com/ethereum/fe/master/logo/fe_svg/fe_source.svg" width="150px">
-
-<br>
-
-
-# Installation / Setup
-
-To set up Foundry x Fe, first make sure you have [Fe](https://fe-lang.org/) installed. Further make sure to set the `FE_PATH` environment variable to the path of the `fe` executable.
-
-Then set up a new Foundry project with the following command (replacing `fe_project_name` with your new project's name).
+## Getting Started
 
 ```
-forge init --template https://github.com/cburgdorf/Foundry-Fe fe_project_name
+# Clone repo.
+git clone https://github.com/0xNonso/p256-verifier-fe.git
+cd p256-verifier-fe
 ```
 
+## Test
+```
+# Install dependencies.
+forge install
 
-Now you are all set up and ready to go! Below is a quick example of how to set up, deploy and test Fe contracts.
-
-
-<br>
-<br>
-
-
-# Compiling/Testing Fe Contracts
-
-The FeDeployer is a pre-built contract that takes a filename and deploys the corresponding Fe contract, returning the address that the bytecode was deployed to. If you want, you can check out [how the FeDeployer works under the hood](https://github.com/cburgdorf/Foundry-Fe/blob/main/lib/utils/FeDeployer.sol). Below is a quick example of how to setup and deploy a SimpleStore contract written in Fe.
-
-
-## SimpleStore.Fe
-
-Here is a simple Fe contract called `SimpleStore.Fe`, which is stored within the `fe_contracts` directory. Make sure to put all of your `.fe` files in the `fe_contracts` directory so that the Fe compiler knows where to look when compiling.
-
-```rust
-contract SimpleStore {
-    val: u256
-
-    pub fn __init__(mut self, val: u256) {
-        self.val = val
-    }
-
-    pub fn store(mut self, val: u256) {
-        self.val = val;
-    }
-
-    pub fn get(self) -> u256 {
-        return self.val
-    }
-}
+# Build and Run tests.
+make test
 ```
 
-<br>
+## Further References
 
-
-## SimpleStore Interface
-
-Next, you will need to create an interface for your contract. This will allow Foundry to interact with your Fe contract, enabling the full testing capabilities that Foundry has to offer.
-
-```js
-
-interface SimpleStore {
-    function store(uint256 val) external;
-    function get() external returns (uint256);
-}
-```
-
-<br>
-
-
-## SimpleStore Test
-
-First, the file imports `ISimpleStore.sol` as well as the `Fe.sol` contract.
-
-To deploy the contract, simply create a new instance of `Fe` and call `Fe.deployContract(fileName)` method, passing in the file name of the contract you want to deploy. Additionally, if the contract requires constructor arguments you can pass them in by supplying an abi encoded representation of the constructor arugments, which looks like this `Fe.deployContract(fileName, abi.encode(arg0, arg1, arg2...))`.
-
-In this example, `SimpleStore` is passed in to deploy the `SimpleStore.fe` contract. The `deployContract` function compiles the Fe contract and deploys the newly compiled bytecode, returning the address that the contract was deployed to. Since the `SimpleStore.fe` takes one constructor argument, the argument is wrapped in `abi.encode()` and passed to the `deployContract` function as a second argument.
-
-The deployed address is then used to initialize the ISimpleStore interface. Once the interface has been initialized, your Fe contract can be used within Foundry like any other Solidity contract.
-
-To test any Fe contract deployed with Fe, simply run `forge test`. Since `ffi` is set to `true` in the `foundry.toml` file, you can run `forge test` without needing to pass in the `--ffi` flag. You can also use additional flags as you would with any other Foundry project. For example: `forge test -f <url> -vvvv`.
-
-```js
-// SPDX-License-Identifier: MIT
-pragma solidity >=0.8.13;
-
-import "../../lib/ds-test/test.sol";
-import "../../lib/utils/Console.sol";
-import "../../lib/utils/Fe.sol";
-
-import "../ISimpleStore.sol";
-
-contract SimpleStoreTest is DSTest {
-
-    ISimpleStore simpleStore;
-
-    function setUp() public {
-        Fe.compileFile("SimpleStore");
-
-        ///@notice deploy a new instance of ISimplestore by passing in the address of the deployed Fe contract
-        simpleStore = ISimpleStore(
-            Fe.deployContract("SimpleStore", abi.encode(1234))
-        );
-    }
-
-    function testGet() public {
-        uint256 val = simpleStore.get();
-
-        require(val == 1234);
-    }
-
-    function testStore(uint256 _val) public {
-        simpleStore.store(_val);
-        uint256 val = simpleStore.get();
-
-        require(_val == val);
-    }
-}
-```
-
-
-<br>
-
-# Compiling Fe ingots
-
-Fe code can easily be splitted across multiple files via [ingots](https://fe-lang.org/docs/release_notes.html?highlight=ingot#features-11). The `Fe` helper supports compiling ingots via `Fe.compileIngot(ingotName)`.
-
-Check the `BasicIngot` example for more details.
-
-
-
-# Other Foundry Integrations
-
-- [Foundry-Vyper](https://github.com/0xKitsune/Foundry-Vyper) 
-- [Foundry-Huff](https://github.com/0xKitsune/Foundry-Huff)
-- [Foundry-Yul+](https://github.com/ControlCplusControlV/Foundry-Yulp)
+- Daimo's GitHub Repository: [daimo-eth/p256-verifier](https://github.com/daimo-eth/p256-verifier)
+- Daimo's Blog: [blog/p256verifier](https://daimo.xyz/blog/p256verifier)
+- Daimo's Website: [p256.eth.limo](https://p256.eth.limo)
+- Daimo's `P256Verifier` Deployment: [`0xc2b78104907F722DABAc4C69f826a522B2754De4`](https://etherscan.io/address/0xc2b78104907F722DABAc4C69f826a522B2754De4)

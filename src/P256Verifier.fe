@@ -1,0 +1,496 @@
+use std::buf::{
+    MemoryBuffer, 
+    RawCallBuffer,
+    MemoryBufferWriter,
+    MemoryBufferReader
+}
+use std::evm
+
+/// Parameters for the sec256r1 (P256) elliptic curve.
+/// Curve prime field modulus.
+const p: u256           = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+
+/// Short Weierstrass first coefficient.
+/// The assumption "a == -3 (mod p)" is used throughout the codebase.
+const a: u256           = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC
+
+/// Short Weierstrass second coefficient.
+const b: u256           = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+
+/// Generating point affine coordinates.
+const GX: u256          = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
+const GY: u256          = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
+
+/// Curve order (number of points).
+const n: u256           = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+/// "-2 mod p" constant is used to speed up inversion and doubling (avoid negation).
+const minus_2modp: u256 = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFD
+
+/// "-2 mod n" constant is used to speed up inversion.
+const minus_2modn: u256 = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC63254F
+
+
+/// ECDSA verification given a signature and a public key.
+fn ecdsa_verify(msg_hash: u256, r: u256, s: u256, pub_key: Array<u256, 2>) -> bool {
+    /// Check r and s are in the scalar field.
+    if r == 0 or r >= n or s == 0 or s >= n {
+        return false
+    }
+    
+    let pub_key_1: u256 = pub_key[0]
+    let pub_key_2: u256 = pub_key[1]
+
+    if not ec_aff_is_valid_pubkey(x: pub_key_1, y: pub_key_2) {
+        return false
+    }
+    
+    let s_inv: u256 = n_mod_inv(u: s)
+    
+    /// (h * s^-1) in scalar field.
+    let scalar_u: u256 = evm::mulmod(msg_hash, s_inv, n)
+    /// (r * s^-1) in scalar field.
+    let scalar_v: u256 = evm::mulmod(r, s_inv, n)
+    
+    let r_x: u256 = ec_zz_mulmuladd(QX: pub_key_1, QY: pub_key_2, scalar_u, scalar_v)
+    return r_x % n == r
+}
+
+/// Check if a point in affine coordinates is on the curve. Reject 0 point at infinity.
+fn ec_aff_is_valid_pubkey(x: u256, y: u256) -> bool {
+    if x >= p or y >= p or (x == 0 and y == 0) {
+        return false
+    }
+    
+    return ec_aff_satisfies_curve_eq(x, y)
+}
+
+fn ec_aff_satisfies_curve_eq(x: u256, y: u256) -> bool {
+    /// y^2
+    let mut lhs: u256 = evm::mulmod(y, y, p)
+    /// x^3 + a*x + b
+    let mut rhs: u256 = evm::addmod(evm::addmod(evm::mulmod(evm::mulmod(x, x, p), x, p), evm::mulmod(a, x, p), p), b, p)
+    
+    return lhs == rhs
+}
+
+/// Computation of uG + vQ using Strauss-Shamir's trick.
+/// Strauss-Shamir is described well in https://stackoverflow.com/a/50994362.
+fn ec_zz_mulmuladd(QX: u256, QY: u256, scalar_u: u256, scalar_v: u256) -> u256 {
+    let mut X_Y_zz_zzz: (u256, u256, u256, u256) = (0, 0, 1, 1)
+
+    let mut HX: u256 = 0
+    let mut HY: u256 = 0
+
+    if scalar_u == 0 and scalar_v == 0 {
+        return 0
+    }
+
+    /// H = g + Q
+    let mut HX_HY: (u256,  u256) = ec_aff_add(x1: GX, y1: GY, x2: QX, y2: QY)
+    HX = HX_HY.item0
+    HY = HX_HY.item1
+    
+    let mut index: i256 = 255
+    let mut bit_pair: u256 = 0
+    
+    /// Find the first bit index that's active in either `scalar_u` or `scalar_v`.
+    while index >= 0 {
+        bit_pair = compute_bitpair(index: u256(index), scalar_u, scalar_v)
+        index -= 1
+        if bit_pair != 0 {
+            break
+        }
+    }
+
+    if bit_pair == 1 {
+        X_Y_zz_zzz.item0 = GX
+        X_Y_zz_zzz.item1 = GY
+    } else if bit_pair == 2 {
+        X_Y_zz_zzz.item0 = QX
+        X_Y_zz_zzz.item1 = QY
+    } else if bit_pair == 3 {
+        X_Y_zz_zzz.item0 = HX
+        X_Y_zz_zzz.item1 = HY
+    }
+
+    let mut TX: u256 = 0
+    let mut TY: u256 = 0
+
+    while index >= 0 {
+        if index < 0 {
+            break
+        }
+
+        X_Y_zz_zzz = ec_zz_double_zz(
+            x1: X_Y_zz_zzz.item0, 
+            y1: X_Y_zz_zzz.item1, 
+            zz1: X_Y_zz_zzz.item2, 
+            zzz1: X_Y_zz_zzz.item3
+        )
+
+        bit_pair = compute_bitpair(index: u256(index), scalar_u, scalar_v)
+        index -= 1
+
+        if bit_pair == 0 {
+            continue
+        } else if bit_pair == 1 {
+            TX = GX
+            TY = GY
+        } else if bit_pair == 2 {
+            TX = QX
+            TY = QY
+        } else {
+            TX = HX
+            TY = HY
+        } 
+
+        X_Y_zz_zzz = ec_zz_dadd_aff(
+            x1: X_Y_zz_zzz.item0, 
+            y1: X_Y_zz_zzz.item1, 
+            zz1: X_Y_zz_zzz.item2, 
+            zzz1: X_Y_zz_zzz.item3, 
+            x2: TX, 
+            y2: TY
+        )
+    }
+
+    /// If zz = 0, zzInv = 0
+    let zz_inv: u256 = p_mod_inv(u: X_Y_zz_zzz.item2)
+    /// X/zz
+    return evm::mulmod(X_Y_zz_zzz.item0, zz_inv,  p)
+}
+
+/// Compute the bits at `index` of `u` and `v` and return
+/// them as 2 bit concatenation. The bit at index 0 is on 
+/// if the `index`th bit of `scalar_u` is on and the bit at
+/// index 1 is on if the `index`th bit of `scalar_v` is on.
+/// Examples:
+///  - compute_bitpair(0, 1, 1) == 3
+///  - compute_bitpair(0, 1, 0) == 1
+///  - compute_bitpair(0, 0, 1) == 2
+fn compute_bitpair(index: u256, scalar_u: u256, scalar_v: u256) -> u256 {
+    return (((scalar_v >> index) & 1) << 1) + ((scalar_u >> index) & 1)
+}
+
+/// Add two elliptic curve points in affine coordinates.
+/// Assumes points are on the elliptic curve.
+fn ec_aff_add(x1: u256, y1: u256, x2: u256, y2: u256) -> (u256, u256) {
+    let mut zz1: u256 = 0
+    let mut zzz1: u256 = 0
+
+    if ec_aff_is_inf(x: x1, y: y1) {
+        return (x2, y2)
+    }
+    if ec_aff_is_inf(x: x2, y: y2) {
+        return (x1, y1)
+    }
+
+    let mut x1_y1_zz1_zzz1: (u256, u256, u256, u256) = ec_zz_dadd_aff(x1, y1, zz1: 1, zzz1: 1, x2, y2)
+
+    return ec_zz_set_aff(
+        x: x1_y1_zz1_zzz1.item0, 
+        y: x1_y1_zz1_zzz1.item1, 
+        zz: x1_y1_zz1_zzz1.item2, 
+        zzz: x1_y1_zz1_zzz1.item3
+    )
+ }
+
+/// Check if a point is the infinity point in affine rep.
+/// Assumes point is on the elliptic curve or is the point at infinity.
+fn ec_aff_is_inf(x: u256, y: u256) -> bool {
+    return x == 0 and y == 0
+}
+
+/// Check if a point is the infinity point in ZZ rep.
+/// Assumes point is on the elliptic curve or is the point at infinity.
+fn ec_zz_is_inf(zz: u256, zzz: u256) -> bool {
+    return zz == 0 and zzz == 0
+}
+
+/// Add a ZZ point to an affine point and return as ZZ representation.
+/// Uses madd-2008-s and mdbl-2008-s internally:
+/// https://hyperelliptic.org/EFD/g1p/auto-shortw-xyzz-3.html#addition-madd-2008-s
+/// Matches https://github.com/supranational/blst/blob/9c87d4a09d6648e933c818118a4418349804ce7f/src/ec_ops.h#L705 closely.
+/// Handles points at infinity gracefully.
+fn ec_zz_dadd_aff(x1: u256, y1: u256, zz1: u256, zzz1: u256, x2: u256, y2: u256) -> (u256, u256, u256, u256) {
+    let mut x3_y3_zz3_zzz3: (u256, u256, u256, u256) = (0, 0, 0, 0)
+
+    /// `(X2, Y2)` is point at infinity.
+    if ec_aff_is_inf(x: x2, y: y2) {
+        if ec_zz_is_inf(zz: zz1, zzz: zzz1) {
+            return ec_zz_point_at_inf()
+        }
+        return (x1, y1, zz1, zzz1)
+
+    /// `(X1, Y1)` is point at infinity.
+    } else if ec_zz_is_inf(zz: zz1, zzz: zzz1) {
+        return (x2, y2, 1, 1)
+    }
+
+    /// R = S2 - y1 = y2*zzz1 - y1
+    let comp_r: u256 = evm::addmod(evm::mulmod(y2, zzz1, p), p - y1, p)
+    /// P = U2 - x1 = x2*zz1 - x1
+    let comp_p: u256 = evm::addmod(evm::mulmod(x2, zz1, p), p - x1, p)
+
+    /// // X1 != X2
+    if comp_p != 0 {
+        /// PP = P^2
+        let comp_pp: u256 = evm::mulmod(comp_p, comp_p, p)
+        /// PPP = P*PP
+        let comp_ppp: u256 = evm::mulmod(comp_pp, comp_p, p)
+        /// ZZ3 = ZZ1*PP
+        x3_y3_zz3_zzz3.item2 = evm::mulmod(zz1, comp_pp, p)
+        /// ZZZ3 = ZZZ1*PPP
+        x3_y3_zz3_zzz3.item3 = evm::mulmod(zzz1, comp_ppp, p)
+        /// Q = X1*PP
+        let comp_q: u256 = evm::mulmod(x1, comp_pp, p)
+        /// X3 = R^2 - PPP - 2*Q
+        x3_y3_zz3_zzz3.item0 = evm::addmod(
+            evm::addmod(evm::mulmod(comp_r, comp_r, p), p - comp_ppp, p),
+            evm::mulmod(minus_2modp, comp_q, p),
+            p
+        )
+        /// Y3 = R*(Q-x3) - y1*PPP
+        x3_y3_zz3_zzz3.item1 = evm::addmod(
+            evm::mulmod(evm::addmod(comp_q, p - x3_y3_zz3_zzz3.item0, p),  comp_r, p),
+            evm::mulmod(p - y1, comp_ppp, p),
+            p
+        )
+    /// X1 == X2 and Y1 == Y2
+    } else if comp_r == 0 {
+        x3_y3_zz3_zzz3 = ec_zz_double_aff(x1: x2, y1: y2)
+    /// X1 == X2 and Y1 == -Y2
+    } else {
+        x3_y3_zz3_zzz3 = ec_zz_point_at_inf()
+    }
+
+    return x3_y3_zz3_zzz3
+}
+
+/// Double a ZZ point.
+/// Uses http://hyperelliptic.org/EFD/g1p/auto-shortw-xyzz.html#doubling-dbl-2008-s-1
+/// Handles point at infinity gracefully.
+fn ec_zz_double_zz(x1: u256, y1: u256, zz1: u256, zzz1: u256) -> (u256, u256, u256, u256) {
+    let mut x3: u256 = 0
+    let mut y3: u256 = 0
+    let mut zz3: u256 = 0
+    let mut zzz3: u256 = 0
+
+    if ec_zz_is_inf(zz: zz1, zzz: zzz1) {
+        return ec_zz_point_at_inf()
+    }
+
+    /// U = 2*Y1
+    let comp_u: u256 = evm::mulmod(2, y1, p)
+    /// V = U^2
+    let comp_v: u256 = evm::mulmod(comp_u, comp_u, p)
+    /// W = U*V
+    let comp_w: u256 = evm::mulmod(comp_u, comp_v, p)
+    /// S = X1*V
+    let comp_s: u256 = evm::mulmod(x1, comp_v, p)
+    /// M = 3*(X1)^2 + a*(zz1)^2
+    let comp_m: u256 = evm::addmod(evm::mulmod(3, evm::mulmod(x1, x1, p), p), evm::mulmod(a, evm::mulmod(zz1, zz1, p), p), p)
+
+    /// M^2 + (-2)*S
+    x3 = evm::addmod(evm::mulmod(comp_m, comp_m, p), evm::mulmod(minus_2modp, comp_s, p), p)
+    /// M*(S+(-X3)) + (-W)*Y1
+    y3 = evm::addmod(evm::mulmod(comp_m, evm::addmod(comp_s, p - x3, p), p), evm::mulmod(p - comp_w, y1, p), p)
+    /// V*ZZ1
+    zz3 = evm::mulmod(comp_v, zz1, p)
+    /// W*ZZZ1
+    zzz3 = evm::mulmod(comp_w, zzz1, p)
+
+    return (x3, y3, zz3, zzz3)
+}
+
+/// Double an affine point and return as a ZZ point.
+/// Uses http://hyperelliptic.org/EFD/g1p/auto-shortw-xyzz.html#doubling-mdbl-2008-s-1
+/// Handles point at infinity gracefully.
+fn ec_zz_double_aff(x1: u256, y1: u256) -> (u256, u256, u256, u256) {
+    let mut x3: u256 = 0
+    let mut y3: u256 = 0
+    let mut zz3: u256 = 0
+    let mut zzz3: u256 = 0
+
+    if ec_aff_is_inf(x: x1, y: y1) {
+        return ec_zz_point_at_inf()
+    }
+
+    /// U = 2*Y1
+    let comp_u: u256 = evm::mulmod(2, y1, p)
+    /// V = U^2 = zz3
+    zz3 = evm::mulmod(comp_u, comp_u, p)
+    /// W = U*V = zzz3
+    zzz3 = evm::mulmod(comp_u, zz3, p)
+    /// S = X1*V
+    let comp_s: u256 = evm::mulmod(x1, zz3, p)
+    /// M = 3*(X1)^2 + a
+    let comp_m: u256 = evm::addmod(evm::mulmod(3, evm::mulmod(x1, x1, p), p), a, p)
+
+    /// M^2 + (-2)*S
+    x3 = evm::addmod(evm::mulmod(comp_m, comp_m, p), evm::mulmod(minus_2modp, comp_s, p), p)
+    /// M*(S+(-X3)) + (-W)*Y1
+    y3 = evm::addmod(evm::mulmod(comp_m, evm::addmod(comp_s, p - x3, p), p), evm::mulmod(p - zzz3, y1, p), p)
+
+    return (x3, y3, zz3, zzz3)
+}
+
+/// Convert from ZZ representation to affine representation.
+/// Assumes (zz)^(3/2) == zzz (i.e. zz == z^2 and zzz == z^3)
+/// See https://hyperelliptic.org/EFD/g1p/auto-shortw-xyzz-3.html
+fn ec_zz_set_aff(x: u256, y: u256, zz: u256, zzz: u256) -> (u256, u256) {
+    let mut x1_y1: (u256, u256) = (0, 0)
+
+    if ec_zz_is_inf(zz, zzz) {
+        x1_y1 = ec_aff_point_at_inf()
+        return x1_y1
+    }
+    /// 1 / zzz
+    let zzz_inv: u256 = p_mod_inv(u: zzz)
+    /// 1 / z
+    let z_inv: u256 = evm::mulmod(zz, zzz_inv, p)
+    /// 1 / zz
+    let zz_inv: u256 = evm::mulmod(z_inv, z_inv, p)
+
+    /// X / zz
+    x1_y1.item0 = evm::mulmod(x, zz_inv, p)
+    /// y = Y / zzz
+    x1_y1.item1 = evm::mulmod(y, zzz_inv, p)
+
+    return x1_y1
+}
+
+/// Point at infinity in ZZ representation.
+fn ec_zz_point_at_inf() -> (u256, u256, u256, u256) {
+    return (0, 0, 0, 0)
+}
+
+/// Point at infinity in affine representation.
+fn ec_aff_point_at_inf() -> (u256, u256) {
+    return (0, 0)
+}
+
+/// u^-1 mod n
+fn n_mod_inv(u: u256) -> u256 {
+    return mod_inv(u, f: n, minus_2modf: minus_2modn)
+}
+
+/// u^-1 mod p
+fn p_mod_inv(u: u256) -> u256 {
+    return mod_inv(u, f: p, minus_2modf: minus_2modp)
+}
+
+/// u^-1 mod f = u^(phi(f) - 1) mod f = u^(f-2) mod f for prime f
+/// by Fermat's little theorem, compute u^(f-2) mod f using modexp precompile
+/// Assume f != 0. If u is 0, then u^-1 mod f is undefined mathematically, 
+/// but this function returns 0.
+fn mod_inv(u: u256, f: u256, minus_2modf: u256) -> u256 {
+    let mut buf_1: MemoryBuffer = MemoryBuffer::new(len: 32)
+    let mut writer_1: MemoryBufferWriter = buf_1.writer()
+    writer_1.write(value: u)
+
+    let mut buf_2: MemoryBuffer = MemoryBuffer::new(len: 32)
+    let mut writer_2: MemoryBufferWriter = buf_2.writer()
+    writer_2.write(value: f)
+
+    let mut buf_3: MemoryBuffer = MemoryBuffer::new(len: 32)
+    let mut writer_3: MemoryBufferWriter = buf_3.writer()
+    writer_3.write(value: minus_2modf)
+
+    let mut ret_buf: MemoryBuffer = std::precompiles::mod_exp(b_size: 32, e_size: 32, m_size: 32, b: buf_1, e: buf_3, m: buf_2)
+    let mut reader: MemoryBufferReader = ret_buf.reader()
+    return reader.read_u256()
+}
+
+
+
+
+contract P256Verifier {
+
+    pub unsafe fn __call__() {
+        /// Precompiles don't use a function signature. The first byte of callldata
+        /// is the first byte of an input argument. In this case:
+        
+        /// input[  0: 32] = signed data hash
+        /// input[ 32: 64] = signature r
+        /// input[ 64: 96] = signature s
+        /// input[ 96:128] = public key x
+        /// input[128:160] = public key y
+     
+        /// result[ 0: 32] = 0x00..00 (invalid) or 0x00..01 (valid)
+
+        let mut buf: MemoryBuffer = MemoryBuffer::new(len: 32)
+        let mut writer: MemoryBufferWriter = buf.writer()
+
+        if evm::call_data_size() != 160 {
+            writer.write(value: 0)
+        } else {
+            /// The signed data hash.
+            let mut hash: u256 = evm::call_data_load(offset: 0)
+            /// The secp256r1 32-byte signature parameter `r`.
+            let mut r: u256 = evm::call_data_load(offset: 32)
+            /// The secp256r1 32-byte signature parameter `s`.
+            let mut s: u256 = evm::call_data_load(offset: 64)
+            /// The public key `x`.
+            let mut x: u256 = evm::call_data_load(offset: 96)
+            /// The public key `y`.
+            let mut y: u256 = evm::call_data_load(offset: 128)
+
+            if ecdsa_verify(msg_hash: hash, r, s, pub_key: [x, y]) {
+                writer.write(value: 1)
+            } else {
+                writer.write(value: 0)
+            }
+        }
+        evm::return_mem(buf)
+    }
+}
+
+struct P256 {
+    addr: address
+    pub fn new(addr: address) -> Self {
+        return P256(addr)
+    }
+
+    pub fn read_buf(
+        self,
+        hash: u256,
+        r: u256,
+        s: u256,
+        x: u256,
+        y: u256
+    ) -> u256 {
+        let mut buf: RawCallBuffer = RawCallBuffer::new(input_len: 160, output_len: 32)
+
+        let mut writer: MemoryBufferWriter = buf.writer()
+        let mut reader: MemoryBufferReader = buf.reader()
+
+        writer.write(value: hash)
+        writer.write(value: r)
+        writer.write(value: s)
+        writer.write(value: x)
+        writer.write(value: y)
+
+        unsafe { 
+            assert evm::static_call(gas: evm::gas_remaining(), addr: self.addr, buf) 
+        }
+        return reader.read_u256()
+    }
+}
+
+#test
+fn test_p256(mut ctx: Context) {
+    let addr: address = address(P256Verifier.create(ctx, 0))
+    let p256: P256 = P256::new(addr)
+
+    let mut hash: u256 = 0xbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca605023;
+    let mut r: u256 = 19738613187745101558623338726804762177711919211234071563652772152683725073944;
+    let mut s: u256 = 34753961278895633991577816754222591531863837041401341770838584739693604822390;
+    let mut x: u256 = 18614955573315897657680976650685450080931919913269223958732452353593824192568;
+    let mut y: u256 = 90223116347859880166570198725387569567414254547569925327988539833150573990206;
+    
+    assert p256.read_buf(
+        hash, r, s, x, y
+    ) == 1
+}

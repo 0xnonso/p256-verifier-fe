@@ -4,4 +4,5 @@ out = 'out'
 libs = ['lib']
 ffi = true
 remappings = ['ds-test/=lib/ds-test/src/']
+fs_permissions = [{ access = "read-write", path = "./"}]
 

@@ -20,7 +20,7 @@ library Fe {
         compile_cmds[0] = cheatCodes.envString("FE_PATH");
         compile_cmds[1] = "build";
         compile_cmds[2] = "--overwrite";
-        compile_cmds[3] = string(abi.encodePacked("fe_contracts/", string(abi.encodePacked(fileName, ".fe"))));
+        compile_cmds[3] = string(abi.encodePacked("src/", string(abi.encodePacked(fileName, ".fe"))));
         cheatCodes.ffi(compile_cmds);
     }
 
@@ -31,7 +31,7 @@ library Fe {
         compile_cmds[0] = cheatCodes.envString("FE_PATH");
         compile_cmds[1] = "build";
         compile_cmds[2] = "--overwrite";
-        compile_cmds[3] = string(abi.encodePacked("fe_contracts/", ingotName));
+        compile_cmds[3] = string(abi.encodePacked("src/", ingotName));
         cheatCodes.ffi(compile_cmds);
     }
 
